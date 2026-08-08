@@ -1,0 +1,1 @@
+ALTER TABLE "onboarding_resources" DROP COLUMN "is_active";
