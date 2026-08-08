@@ -1,0 +1,67 @@
+# Production deployment. Separate from docker-compose.yml (local development) rather than an
+# override merged on top of it — production and local dev need genuinely different services
+# (no Mailpit here) and genuinely different failure behavior (missing secrets should stop the
+# deploy, not silently fall back to something insecure), so keeping them as two independent
+# files is clearer than trying to reconcile that with Compose's override-merge rules.
+#
+# Usage:
+#   cp .env.production.example .env
+#   # fill in real values in .env — see .env.production.example and DEPLOYMENT.md
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Every ${VAR:?...} below means docker compose refuses to start with a clear error instead of
+# falling back to an insecure or wrong default — there is no equivalent of the local dev
+# Mailpit/insecure-secret fallbacks here.
+#
+# If you're using a managed Postgres (RDS, Cloud SQL, Neon, Supabase, etc.) instead of the
+# bundled `db` service below: delete the `db` service block and the `depends_on` entry under
+# `app`, and set DATABASE_URL in your .env to that provider's connection string directly.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=leaflow
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env — see .env.production.example}
+      - POSTGRES_DB=leaflow
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leaflow -d leaflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+    # Deliberately no `ports:` — the database is reachable only from the `app` container over
+    # the Compose-internal network, not from the host. If you need direct access (e.g. a
+    # one-off migration/backup tool), prefer binding to 127.0.0.1 rather than all interfaces.
+
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - SESSION_SECRET=${SESSION_SECRET:?Set SESSION_SECRET in .env — see .env.production.example}
+      - DATABASE_URL=${DATABASE_URL:?Set DATABASE_URL in .env — see .env.production.example}
+      - APP_URL=${APP_URL:?Set APP_URL to your production domain — see .env.production.example}
+      # No Mailpit fallback here. If SMTP_HOST is left unset, src/lib/email.ts logs emails to
+      # the container's own logs instead of sending them — fine for a first smoke test, not for
+      # real users. See .env.production.example for real-provider examples.
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - EMAIL_FROM=${EMAIL_FROM:?Set EMAIL_FROM to a verified sender address — see .env.production.example}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  db-data:
