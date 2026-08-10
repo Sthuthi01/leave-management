@@ -48,7 +48,11 @@ export async function seedIfEmpty(): Promise<void> {
     }))
   );
   await db.insert(schema.employeeTaskCompletions).values(mock.onboardingTaskCompletions.map((c) => ({ ...c, completedAt: new Date(c.completedAt) })));
-  await db.insert(schema.appSettings).values({ id: 1, ...mock.defaultSettings });
+  // onConflictDoNothing: migration 0009 now inserts this same row unconditionally (every
+  // environment needs working app_settings, not just demo ones), so on a fresh database it
+  // already exists by the time this runs — this just confirms the values match rather than
+  // erroring on the primary key collision.
+  await db.insert(schema.appSettings).values({ id: 1, ...mock.defaultSettings }).onConflictDoNothing({ target: schema.appSettings.id });
 
   // So the next call to nextRequestId() continues after the seeded reference numbers instead of colliding with them.
   await db.execute(sql`select setval('leave_request_seq', ${mock.leaveRequests.length})`);

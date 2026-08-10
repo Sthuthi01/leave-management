@@ -64,6 +64,13 @@
       "when": 1786180415873,
       "tag": "0008_faulty_hellcat",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786341535598,
+      "tag": "0009_seed_default_app_settings",
+      "breakpoints": true
     }
   ]
 }
