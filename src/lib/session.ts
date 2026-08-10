@@ -10,9 +10,22 @@ let warnedInsecureDefault = false;
  * will have SESSION_SECRET set. See the identical pattern (and reasoning) for DATABASE_URL in
  * src/lib/db/client.ts.
  */
+// A cookie signed with a weak secret is exactly as forgeable as one signed with no secret at all
+// — 32 chars is the length of `openssl rand -hex 32`'s output (128 bits, the value every doc in
+// this repo tells operators to generate), so anything shorter is almost certainly a placeholder,
+// a short password, or copy-paste of only part of a real value, not a properly generated secret.
+const MIN_SECRET_LENGTH = 32;
+
 function getSecret(): string {
   const secret = process.env.SESSION_SECRET;
-  if (secret) return secret;
+  if (secret) {
+    if (process.env.NODE_ENV === "production" && secret.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `SESSION_SECRET is set but too short (${secret.length} characters, need at least ${MIN_SECRET_LENGTH}) to safely sign session cookies in production. Generate a proper one with: openssl rand -hex 32`
+      );
+    }
+    return secret;
+  }
 
   if (process.env.NODE_ENV === "production") {
     throw new Error(

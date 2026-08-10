@@ -8,6 +8,11 @@ export default defineConfig({
   fullyParallel: false,
   retries: 0,
   workers: 1,
+  // Slightly above the 30s default as headroom for the slowest step in this suite (the
+  // set-password → dashboard navigation, which does real server-side rendering), not to paper
+  // over any known issue — see the note on submitSetPassword in tests/e2e/helpers/set-password.ts
+  // for the actual bug that used to live here (fixed at the source, in application code).
+  timeout: 45_000,
   reporter: [["list"]],
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3000",

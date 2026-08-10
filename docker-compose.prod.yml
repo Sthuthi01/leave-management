@@ -38,8 +38,13 @@ services:
 
   app:
     build: .
-    ports:
-      - "3000:3000"
+    # Deliberately no `ports:` — the app is reachable only from the `caddy` container over the
+    # Compose-internal network, never directly from the host/internet. All real traffic must go
+    # through Caddy's TLS termination below; see DEPLOYMENT.md's "TLS / reverse proxy" section for
+    # why that isn't optional (session cookies, X-Forwarded-For-based rate limiting, and audit-log
+    # IP attribution all depend on it). For direct troubleshooting, use the same check the
+    # Dockerfile's own HEALTHCHECK runs:
+    #   docker compose -f docker-compose.prod.yml exec app node -e "fetch('http://localhost:3000/api/health').then(r=>r.text()).then(console.log)"
     environment:
       - SESSION_SECRET=${SESSION_SECRET:?Set SESSION_SECRET in .env — see .env.production.example}
       - DATABASE_URL=${DATABASE_URL:?Set DATABASE_URL in .env — see .env.production.example}
@@ -53,6 +58,9 @@ services:
       - SMTP_USER=${SMTP_USER}
       - SMTP_PASS=${SMTP_PASS}
       - EMAIL_FROM=${EMAIL_FROM:?Set EMAIL_FROM to a verified sender address — see .env.production.example}
+      # Optional — error tracking is skipped entirely if this is left unset. See
+      # DEPLOYMENT.md's "Error tracking and uptime monitoring" section.
+      - SENTRY_DSN=${SENTRY_DSN}
     depends_on:
       db:
         condition: service_healthy
@@ -63,5 +71,71 @@ services:
           cpus: "1.0"
           memory: 512M
 
+  # Takes a full database backup automatically every day at 2 AM, keeps the last
+  # BACKUP_RETENTION_DAYS (30 by default), and takes one immediately when this container starts
+  # so a fresh deployment has a backup right away. See DEPLOYMENT.md's "Backups and disaster
+  # recovery" section for how to check on backups and how to restore one — both are single
+  # commands, no database expertise required.
+  #
+  # Deliberately stores backups on a separate volume (db-backups) from the live database
+  # (db-data), so the two are never on the exact same storage. That still doesn't protect against
+  # losing the whole machine (disk failure, the VM being deleted, etc.) — see DEPLOYMENT.md for
+  # why you should also copy backups off this machine periodically.
+  backup:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env — see .env.production.example}
+      - POSTGRES_USER=leaflow
+      - POSTGRES_DB=leaflow
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-30}
+    volumes:
+      - db-backups:/backups
+      - ./backup/backup.sh:/scripts/backup.sh:ro
+      - ./backup/crontab:/etc/crontabs/root:ro
+    entrypoint: ["/bin/sh", "-c", "sh /scripts/backup.sh && crond -f -l 2"]
+    healthcheck:
+      # Unhealthy if there's no backup newer than 2 days old — since backups run daily, this
+      # only ever trips if something's actually gone wrong. Visible in `docker compose ps`.
+      test: ["CMD-SHELL", "find /backups -name 'leaflow_*.dump' -mtime -2 | grep -q ."]
+      interval: 1h
+      timeout: 10s
+      retries: 1
+      start_period: 5m
+    restart: always
+
+  # Terminates HTTPS and reverse-proxies everything to `app`, which has no host port of its own —
+  # see the comment on `app` above and DEPLOYMENT.md's "TLS / reverse proxy" section. Caddy
+  # automatically obtains and renews a real Let's Encrypt certificate for APP_DOMAIN with no
+  # extra configuration, as long as that domain's public DNS points at this machine and ports
+  # 80/443 are reachable from the internet. See the Caddyfile and DEPLOYMENT.md for the
+  # alternative setup (a manually-provided certificate) if this is a pure-internal deployment
+  # with no public DNS record for APP_DOMAIN.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - APP_DOMAIN=${APP_DOMAIN:?Set APP_DOMAIN in .env to the domain employees will use to reach this app — see .env.production.example}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: always
+
 volumes:
   db-data:
+  # Named explicitly (rather than left to Compose's default project-prefixed naming) so
+  # backup/test-restore.sh can find it reliably regardless of what folder this is deployed from.
+  db-backups:
+    name: leaflow-db-backups
+  # Caddy's certificate storage and internal state — must persist across restarts/updates, or
+  # every restart would re-request a fresh certificate from Let's Encrypt and could eventually hit
+  # its rate limits.
+  caddy-data:
+  caddy-config:

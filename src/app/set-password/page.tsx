@@ -50,8 +50,14 @@ function SetPasswordForm({ token }: { token: string }) {
     try {
       await api.post("/auth/set-password", { token, password: values.password });
       toast.success(data?.purpose === "RESET" ? "Password reset. You're signed in." : "Account activated. You're signed in.");
+      // router.push() alone already fetches a fresh RSC payload for the destination route (using
+      // the just-set session cookie), so a follow-up router.refresh() is redundant — and, fired
+      // immediately after push() before React has committed the navigation, it raced with this
+      // page's own Suspense/useSearchParams-driven render and intermittently left the client stuck
+      // on this page after a successful submission (confirmed via repeated E2E runs correlating
+      // with server-side "destination stream closed early" errors, and ruled out as a test-timing
+      // issue by a clean manual reproduction of the same flow).
       router.push("/");
-      router.refresh();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Something went wrong. Please try again.");
       setSubmitting(false);

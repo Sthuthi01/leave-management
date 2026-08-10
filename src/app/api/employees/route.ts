@@ -8,9 +8,15 @@ import { inviteEmployee } from "@/lib/invitation-service";
 import { withApiHandler } from "@/lib/api-handler";
 import type { Role } from "@/types";
 
+// Full-roster read — every field here (including account status and onboarding state) is meant
+// for HR/admin use (the employee directory, department headcounts, the manager-picker dropdown),
+// all of which live behind admin-only pages. Gated the same as the mutating actions below, not
+// just "signed in", so a regular employee can't pull the entire company roster (who's inactive,
+// who hasn't activated their account yet, etc.) via a direct API call — see the Guardrail Audit.
 export const GET = withApiHandler(async (request: NextRequest) => {
   const user = await getCurrentUserFromRequest(request);
   if (!user) return errorResponse(401, "Not signed in.");
+  if (user.role !== "ADMIN") return errorResponse(403, "Only admins can view the employee directory.");
   const snapshot = await loadSnapshot();
   const employees = snapshot.employees.map((e) => hydrateEmployee(snapshot, e)).sort((a, b) => a.name.localeCompare(b.name));
   return NextResponse.json(employees);

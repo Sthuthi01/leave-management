@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserFromRequest } from "@/lib/auth";
 import { errorResponse } from "@/lib/api-response";
 import { accruedToDate, getOrCreateBalance, hydrateLeaveRequest, loadSnapshot } from "@/lib/db/repo";
-import { CURRENT_YEAR } from "@/lib/mock-data/seed";
 import type { AttentionPendingApproval, DashboardData, DepartmentStat, LeaveBalanceSummary, LeaveTypeUtilization } from "@/types";
 
 // A pending request starting this soon is flagged regardless of how long it's been waiting —
@@ -33,15 +32,16 @@ export async function GET(request: NextRequest) {
 
   const snapshot = await loadSnapshot();
   const today = todayISO();
+  const currentYear = new Date().getFullYear();
   const upcomingHolidays = [...snapshot.holidays].filter((h) => h.date >= today).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5);
 
   if (user.role !== "ADMIN") {
     const myRequests = snapshot.leaveRequests.filter((r) => r.employeeId === user.id);
     const balances: LeaveBalanceSummary[] = [];
     for (const leaveType of snapshot.leaveTypes.filter((t) => t.isActive)) {
-      const bal = await getOrCreateBalance(snapshot, user.id, leaveType.id, CURRENT_YEAR);
+      const bal = await getOrCreateBalance(snapshot, user.id, leaveType.id, currentYear);
       const accrued = accruedToDate(user, leaveType, bal);
-      balances.push({ leaveType, year: CURRENT_YEAR, allocated: bal.allocated, used: bal.used, remaining: accrued - bal.used, accruedToDate: accrued, carriedForward: bal.carriedForward });
+      balances.push({ leaveType, year: currentYear, allocated: bal.allocated, used: bal.used, remaining: accrued - bal.used, accruedToDate: accrued, carriedForward: bal.carriedForward });
     }
 
     const data: DashboardData = {
@@ -71,7 +71,7 @@ export async function GET(request: NextRequest) {
   const leaveUtilization: LeaveTypeUtilization[] = snapshot.leaveTypes
     .filter((t) => t.isActive)
     .map((leaveType) => {
-      const rows = snapshot.leaveBalances.filter((b) => b.leaveTypeId === leaveType.id && b.year === CURRENT_YEAR);
+      const rows = snapshot.leaveBalances.filter((b) => b.leaveTypeId === leaveType.id && b.year === currentYear);
       return {
         leaveType,
         allocated: rows.reduce((sum, r) => sum + r.allocated, 0),

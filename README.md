@@ -56,6 +56,12 @@ npm run test:e2e    # end-to-end (Playwright) — needs the local dev stack runn
 
 The E2E suite (`tests/e2e/`) drives a real browser against the running `docker-compose.yml` stack and reads generated invitation/reset emails straight out of Mailpit's API — it covers login/logout, invitation → set password → auto sign-in, forgot/reset password, change password, leave application → approval/rejection, and role-based access (an Employee or Manager hitting an HR-Admin-only page or API directly gets blocked). It shares whatever database state the stack currently has — each test creates its own throwaway employee(s) rather than relying on or resetting existing data, so it's safe to run against your everyday local dev database.
 
+**A note on rate limiting during repeated CI/local runs:** `POST /api/auth/set-password` is rate-limited to 10 requests per 15-minute window (see `src/lib/rate-limit.ts`), keyed by client IP. Each full E2E run submits 5 such requests (invitation activation, password reset, change-password setup flows). Behind a real reverse proxy each caller gets a distinct IP-based bucket, so a normal user never comes close to this limit — but the local `docker-compose.yml` stack has no reverse proxy, so every request in that environment falls back to one shared bucket (see the `getClientIp` comment in `src/lib/rate-limit.ts` for why). Running the suite more than twice within the same 15-minute window — e.g. while iterating on a test locally, or a CI job that reruns the suite — can exhaust that shared bucket and cause later, entirely legitimate set-password submissions to receive a real `429`. This is the rate limiter working as designed, not test flakiness. If you hit it:
+- Restart the `app` container (`docker compose restart app`) — its rate-limit state is in-memory only, so this clears it instantly without touching the database or any other state, or
+- Wait for the 15-minute window to elapse.
+
+Do not raise this limit or special-case test traffic to work around it — it's a deliberate anti-abuse control and applies identically in UAT and production.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

@@ -3,10 +3,15 @@
 FROM node:20-alpine AS base
 
 # ---- deps: install dependencies in their own layer so `npm ci` only reruns when
-# package.json/package-lock.json actually change, not on every source edit ----
+# package.json/package-lock.json/vendor actually change, not on every source edit ----
 FROM base AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
+# xlsx is installed from a vendored tarball (vendor/xlsx-0.20.3.tgz), not the npm registry or
+# cdn.sheetjs.com — see package.json's "xlsx" dependency — so `npm ci` never needs network access
+# beyond the npm registry itself, and isn't at the mercy of an external CDN's uptime during a
+# build. Must be copied in before `npm ci` since that's what actually resolves the file: reference.
+COPY vendor ./vendor
 RUN npm ci
 
 # ---- builder: compile the Next.js app ----

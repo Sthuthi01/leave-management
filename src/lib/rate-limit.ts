@@ -79,6 +79,12 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
  * bucket every time, fully bypassing login/forgot-password/set-password rate limiting. Never
  * deploy this app directly on the public internet without a reverse proxy that sets this header
  * itself and strips/overwrites any client-supplied copy.
+ *
+ * CI/local dev note: the reverse-proxy-less `docker-compose.yml` stack (used by the E2E suite)
+ * has neither header set, so this falls back to the literal string "unknown" for every request —
+ * every caller in that environment shares one rate-limit bucket per key. See the "rate limiting
+ * during repeated CI/local runs" note in README.md's Testing section if a set-password 429 shows
+ * up during repeated local/CI test runs; it's expected there, not a bug.
  */
 export function getClientIp(request: Request): string {
   const forwardedFor = request.headers.get("x-forwarded-for");

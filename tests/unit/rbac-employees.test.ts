@@ -16,6 +16,47 @@ vi.mock("@/lib/db/repo", () => repoMocks);
 vi.mock("@/lib/db/onboarding-repo", () => ({ checklistExists: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/lib/invitation-service", () => ({ inviteEmployee: vi.fn().mockResolvedValue(undefined) }));
 
+describe("GET /api/employees — direct API access as each role", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("rejects an unauthenticated request", async () => {
+    getCurrentUserFromRequest.mockResolvedValue(null);
+    const { GET } = await import("@/app/api/employees/route");
+    const res = await GET(makeRequest("http://test/api/employees"));
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects an EMPLOYEE trying to read the full company roster directly via the API", async () => {
+    // The admin Employees page already 404s for non-admins, but the underlying data endpoint used
+    // to have no role check at all — any signed-in employee could pull the entire directory
+    // (including account status and onboarding state) with a direct API call. See the Guardrail
+    // Audit finding this closes.
+    getCurrentUserFromRequest.mockResolvedValue(makeUser({ role: "EMPLOYEE" }));
+    const { GET } = await import("@/app/api/employees/route");
+    const res = await GET(makeRequest("http://test/api/employees"));
+    expect(res.status).toBe(403);
+    expect(repoMocks.loadSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("rejects a MANAGER trying to read the full company roster directly via the API", async () => {
+    getCurrentUserFromRequest.mockResolvedValue(makeUser({ role: "MANAGER" }));
+    const { GET } = await import("@/app/api/employees/route");
+    const res = await GET(makeRequest("http://test/api/employees"));
+    expect(res.status).toBe(403);
+    expect(repoMocks.loadSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("allows an ADMIN to read the full company roster", async () => {
+    getCurrentUserFromRequest.mockResolvedValue(makeUser({ role: "ADMIN" }));
+    repoMocks.loadSnapshot.mockResolvedValue({ employees: [makeUser({ id: "emp-2", name: "Someone Else" })] });
+    const { GET } = await import("@/app/api/employees/route");
+    const res = await GET(makeRequest("http://test/api/employees"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveLength(1);
+  });
+});
+
 describe("POST /api/employees — direct API access as each role", () => {
   beforeEach(() => vi.clearAllMocks());
 

@@ -55,8 +55,19 @@ async function initialize(): Promise<void> {
   await inviteEmployeesMissingPassword();
 }
 
-/** Awaited once per process before any query runs — see ensureReady() below. */
+/**
+ * Awaited once per process before any query runs. If initialize() rejects (a transient DB
+ * outage at startup, a migration that fails once, etc.), the cached promise is cleared before
+ * rethrowing — otherwise every future call would keep returning that same rejected promise
+ * forever, silently failing every request for the rest of the process's life with no way to
+ * recover short of a restart. Clearing it lets the next call retry from scratch instead.
+ */
 export function ensureReady(): Promise<void> {
-  if (!globalForDb.__leaflowReady) globalForDb.__leaflowReady = initialize();
+  if (!globalForDb.__leaflowReady) {
+    globalForDb.__leaflowReady = initialize().catch((err) => {
+      globalForDb.__leaflowReady = undefined;
+      throw err;
+    });
+  }
   return globalForDb.__leaflowReady;
 }

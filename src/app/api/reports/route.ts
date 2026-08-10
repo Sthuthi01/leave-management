@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserFromRequest } from "@/lib/auth";
 import { errorResponse } from "@/lib/api-response";
 import { hydrateLeaveRequest, loadSnapshot } from "@/lib/db/repo";
-import { CURRENT_YEAR } from "@/lib/mock-data/seed";
 import type { LeaveRequest, ReportsData } from "@/types";
 
 function todayISO() {
@@ -25,7 +24,7 @@ export async function GET(request: NextRequest) {
   if (user.role !== "ADMIN") return errorResponse(403, "Only admins can view reports.");
 
   const params = request.nextUrl.searchParams;
-  const from = params.get("from") || `${CURRENT_YEAR}-01-01`;
+  const from = params.get("from") || `${new Date().getFullYear()}-01-01`;
   const to = params.get("to") || todayISO();
   const departmentId = params.get("departmentId") || null;
   const leaveTypeId = params.get("leaveTypeId") || null;

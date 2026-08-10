@@ -11,8 +11,6 @@ import type {
   OnboardingTask,
 } from "@/types";
 
-export const CURRENT_YEAR = 2026;
-
 export const departments: Department[] = [
   { id: "dept-eng", name: "Engineering" },
   { id: "dept-sales", name: "Sales" },
@@ -208,7 +206,10 @@ export const holidays: Holiday[] = [
 ];
 
 function balance(employeeId: string, leaveTypeId: string, allocated: number, used: number): LeaveBalance {
-  return { employeeId, leaveTypeId, year: CURRENT_YEAR, allocated, used, carriedForward: 0 };
+  // Computed at seed time (this only ever runs once, against an empty database — see
+  // seedIfEmpty in db/seed.ts) rather than hardcoded, so a demo environment started in any year
+  // gets a balance row for that same year, matching what the real app looks up for "now".
+  return { employeeId, leaveTypeId, year: new Date().getFullYear(), allocated, used, carriedForward: 0 };
 }
 
 export const leaveBalances: LeaveBalance[] = employees.flatMap((emp) => [

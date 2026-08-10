@@ -1,8 +1,7 @@
 import { randomUUID } from "crypto";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { db, ensureReady } from "./client";
 import * as schema from "./schema";
-import { CURRENT_YEAR } from "@/lib/mock-data/seed";
 import type {
   AppSettings,
   AuditLogEntry,
@@ -145,8 +144,25 @@ export async function getOrCreateBalance(snapshot: Snapshot, employeeId: string,
     const proratedAnnual = Math.round((leaveType.defaultDaysPerYear * monthsAvailable) / 12);
     const carriedForward = Math.max(0, Math.min(leaveType.carryForwardLimit, previousYearRemaining(snapshot, employeeId, leaveTypeId, year)));
 
-    bal = { employeeId, leaveTypeId, year, allocated: proratedAnnual + carriedForward, used: 0, carriedForward };
-    await db.insert(schema.leaveBalances).values(bal);
+    const candidate = { employeeId, leaveTypeId, year, allocated: proratedAnnual + carriedForward, used: 0, carriedForward };
+
+    // Two requests for the same (employee, leaveType, year) with no existing balance row can both
+    // reach this branch at nearly the same time (e.g. applying for two different leave types'
+    // first-ever request in the same instant). ON CONFLICT DO NOTHING makes the losing insert a
+    // safe no-op instead of a unique-violation error on the (employeeId, leaveTypeId, year)
+    // primary key — both racers compute identical allocated/carriedForward values from the same
+    // inputs, so whichever insert actually lands is correct either way. Re-selecting afterward
+    // (rather than trusting our own locally-computed `candidate`) guarantees we return what's
+    // actually persisted.
+    await db
+      .insert(schema.leaveBalances)
+      .values(candidate)
+      .onConflictDoNothing({ target: [schema.leaveBalances.employeeId, schema.leaveBalances.leaveTypeId, schema.leaveBalances.year] });
+    const [row] = await db
+      .select()
+      .from(schema.leaveBalances)
+      .where(and(eq(schema.leaveBalances.employeeId, employeeId), eq(schema.leaveBalances.leaveTypeId, leaveTypeId), eq(schema.leaveBalances.year, year)));
+    bal = row;
     snapshot.leaveBalances.push(bal);
   }
   return bal;
@@ -172,17 +188,136 @@ export function accruedToDate(employee: Employee, leaveType: LeaveType, balance:
   return balance.carriedForward + Math.min(freshAnnual, accruedFresh);
 }
 
-export async function setBalanceUsed(employeeId: string, leaveTypeId: string, year: number, used: number): Promise<void> {
-  await db
-    .update(schema.leaveBalances)
-    .set({ used })
-    .where(and(eq(schema.leaveBalances.employeeId, employeeId), eq(schema.leaveBalances.leaveTypeId, leaveTypeId), eq(schema.leaveBalances.year, year)));
-}
+export type ApplyLeaveResult =
+  | { ok: true; request: LeaveRequest }
+  | { ok: false; reason: "OVERLAP"; overlapping: { referenceNumber: string; status: LeaveStatus; startDate: string; endDate: string } }
+  | { ok: false; reason: "INSUFFICIENT_BALANCE"; available: number };
 
-export async function nextRequestId(): Promise<{ id: string; referenceNumber: string }> {
-  const rows = (await db.execute(sql`select nextval('leave_request_seq') as seq`)) as unknown as { seq: string }[];
-  const seq = Number(rows[0].seq);
-  return { id: randomUUID(), referenceNumber: `LR-${CURRENT_YEAR}-${String(seq).padStart(4, "0")}` };
+/**
+ * Runs the entire "apply for leave" critical section — a fresh overlap re-check, the balance cap
+ * check for capped leave types, inserting the request, and (if auto-approved) consuming the
+ * balance — inside a single database transaction, serialized per employee via a Postgres advisory
+ * lock taken as the transaction's very first statement.
+ *
+ * Why this exists: the overlap check and the balance cap check are both "read current state, then
+ * decide" — unlike decideLeaveRequestTx/cancelLeaveRequestTx below, there's no status column to
+ * condition an atomic UPDATE on here, since this is an INSERT. Two concurrent apply calls for the
+ * same employee (a double-click, a client retry after a slow network, two open tabs) could
+ * otherwise both read "no overlap yet" before either had committed, and both succeed — creating
+ * duplicate overlapping requests, or in the auto-approve case, both passing the same balance cap
+ * check and jointly overspending it. `pg_advisory_xact_lock(hashtext(employeeId))` forces the
+ * second call to block until the first fully commits or rolls back before it even starts its own
+ * checks, so it correctly sees whatever the first one did. Scoped per employee (not global) so two
+ * different employees applying at the same moment never wait on each other.
+ */
+export async function applyLeaveRequestAtomic(
+  snapshot: Snapshot,
+  employee: Employee,
+  leaveType: LeaveType,
+  params: { startDate: string; endDate: string; days: number; reason: string; requiresApproval: boolean; approverId: string | null }
+): Promise<ApplyLeaveResult> {
+  const year = new Date(params.startDate).getFullYear();
+  const isCapped = leaveType.defaultDaysPerYear > 0;
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${employee.id}))`);
+
+    // A person can't be on two leaves at once, regardless of leave type — re-verified here
+    // (rather than trusting the snapshot loaded before the lock) because that snapshot could
+    // already be stale by the time we actually hold the lock.
+    const [overlap] = await tx
+      .select({
+        referenceNumber: schema.leaveRequests.referenceNumber,
+        status: schema.leaveRequests.status,
+        startDate: schema.leaveRequests.startDate,
+        endDate: schema.leaveRequests.endDate,
+      })
+      .from(schema.leaveRequests)
+      .where(
+        and(
+          eq(schema.leaveRequests.employeeId, employee.id),
+          inArray(schema.leaveRequests.status, ["PENDING", "APPROVED"]),
+          lte(schema.leaveRequests.startDate, params.endDate),
+          gte(schema.leaveRequests.endDate, params.startDate)
+        )
+      )
+      .limit(1);
+    if (overlap) return { ok: false, reason: "OVERLAP", overlapping: overlap };
+
+    let available = Infinity;
+    let usedSoFar = 0;
+    if (isCapped) {
+      // Same upsert-then-reselect shape as getOrCreateBalance, but running inside this same
+      // locked transaction (via `tx`, not `db`) so it's part of the same atomic, serialized unit.
+      const start = entitlementStart(employee, year);
+      const monthsAvailable = 12 - start.getUTCMonth();
+      const proratedAnnual = Math.round((leaveType.defaultDaysPerYear * monthsAvailable) / 12);
+      const carriedForward = Math.max(0, Math.min(leaveType.carryForwardLimit, previousYearRemaining(snapshot, employee.id, leaveType.id, year)));
+
+      await tx
+        .insert(schema.leaveBalances)
+        .values({ employeeId: employee.id, leaveTypeId: leaveType.id, year, allocated: proratedAnnual + carriedForward, used: 0, carriedForward })
+        .onConflictDoNothing({ target: [schema.leaveBalances.employeeId, schema.leaveBalances.leaveTypeId, schema.leaveBalances.year] });
+      const [bal] = await tx
+        .select()
+        .from(schema.leaveBalances)
+        .where(and(eq(schema.leaveBalances.employeeId, employee.id), eq(schema.leaveBalances.leaveTypeId, leaveType.id), eq(schema.leaveBalances.year, year)));
+
+      available = accruedToDate(employee, leaveType, bal);
+      usedSoFar = bal.used;
+      if (params.days > available - usedSoFar) {
+        return { ok: false, reason: "INSUFFICIENT_BALANCE", available: Math.max(0, available - usedSoFar) };
+      }
+    }
+
+    const seqRows = (await tx.execute(sql`select nextval('leave_request_seq') as seq`)) as unknown as { seq: string }[];
+    const referenceNumber = `LR-${new Date().getFullYear()}-${String(Number(seqRows[0].seq)).padStart(4, "0")}`;
+    const id = randomUUID();
+    const status: LeaveStatus = params.requiresApproval ? "PENDING" : "APPROVED";
+    const now = new Date();
+
+    await tx.insert(schema.leaveRequests).values({
+      id,
+      referenceNumber,
+      employeeId: employee.id,
+      leaveTypeId: leaveType.id,
+      startDate: params.startDate,
+      endDate: params.endDate,
+      days: params.days,
+      reason: params.reason,
+      status,
+      approverId: params.requiresApproval ? params.approverId : null,
+      approverComment: null,
+      appliedAt: now,
+      decidedAt: params.requiresApproval ? null : now,
+    });
+
+    if (!params.requiresApproval && isCapped) {
+      await tx
+        .update(schema.leaveBalances)
+        .set({ used: sql`greatest(0, ${schema.leaveBalances.used} + ${params.days})` })
+        .where(and(eq(schema.leaveBalances.employeeId, employee.id), eq(schema.leaveBalances.leaveTypeId, leaveType.id), eq(schema.leaveBalances.year, year)));
+    }
+
+    return {
+      ok: true,
+      request: {
+        id,
+        referenceNumber,
+        employeeId: employee.id,
+        leaveTypeId: leaveType.id,
+        startDate: params.startDate,
+        endDate: params.endDate,
+        days: params.days,
+        reason: params.reason,
+        status,
+        approverId: params.requiresApproval ? params.approverId : null,
+        approverComment: null,
+        appliedAt: now.toISOString(),
+        decidedAt: params.requiresApproval ? null : now.toISOString(),
+      },
+    };
+  });
 }
 
 export async function logAudit(actor: Pick<Employee, "id" | "name">, action: string, targetType: string, targetLabel: string, details?: string): Promise<void> {
@@ -251,21 +386,81 @@ export async function deleteLeaveType(id: string): Promise<void> {
 
 // ---- leave requests ----
 
-export async function insertLeaveRequest(request: LeaveRequest): Promise<void> {
-  await db.insert(schema.leaveRequests).values({
-    ...request,
-    appliedAt: new Date(request.appliedAt),
-    decidedAt: request.decidedAt ? new Date(request.decidedAt) : null,
+export interface BalanceAdjustment {
+  employeeId: string;
+  leaveTypeId: string;
+  year: number;
+  /** Positive to consume days (approval), negative to release them (cancellation). */
+  days: number;
+}
+
+/**
+ * Atomically transitions a request from PENDING to APPROVED/REJECTED and — in the same database
+ * transaction — applies the resulting balance change, if any. Two things this closes at once:
+ *
+ * 1. The `status = 'PENDING'` condition in the WHERE clause is a mutex, not just a filter. Without
+ *    it, two decide requests for the same leave request landing at nearly the same time (a
+ *    double-click, two browser tabs) could both read status "PENDING" before either write
+ *    happened and both go on to award the balance change, double-counting that single request's
+ *    days. Returns whether this call actually made the change — false means a concurrent call
+ *    already won, and the balance is deliberately left untouched in that case.
+ * 2. Wrapping the status update and the balance update in one transaction means a failure in
+ *    either half rolls back both — a request can never end up marked APPROVED with its balance
+ *    change never applied (or the reverse), even if the process crashes or the database hiccups
+ *    partway through.
+ */
+export async function decideLeaveRequestTx(
+  id: string,
+  status: LeaveStatus,
+  approverComment: string | null,
+  decidedAt: string,
+  balanceAdjustment: BalanceAdjustment | null
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(schema.leaveRequests)
+      .set({ status, approverComment, decidedAt: new Date(decidedAt) })
+      .where(and(eq(schema.leaveRequests.id, id), eq(schema.leaveRequests.status, "PENDING")))
+      .returning({ id: schema.leaveRequests.id });
+    if (updated.length === 0) return false;
+
+    if (balanceAdjustment) {
+      const { employeeId, leaveTypeId, year, days } = balanceAdjustment;
+      await tx
+        .update(schema.leaveBalances)
+        .set({ used: sql`greatest(0, ${schema.leaveBalances.used} + ${days})` })
+        .where(and(eq(schema.leaveBalances.employeeId, employeeId), eq(schema.leaveBalances.leaveTypeId, leaveTypeId), eq(schema.leaveBalances.year, year)));
+    }
+    return true;
   });
 }
 
-export async function decideLeaveRequest(id: string, status: LeaveStatus, approverComment: string | null, decidedAt: string): Promise<void> {
-  await db.update(schema.leaveRequests).set({ status, approverComment, decidedAt: new Date(decidedAt) }).where(eq(schema.leaveRequests.id, id));
-}
+/**
+ * Like decideLeaveRequestTx, but leaves approverComment untouched and accepts either PENDING or
+ * APPROVED as the starting state — used when an employee cancels their own request. Same mutex
+ * and same-transaction reasoning: the status condition prevents a duplicate/racing cancel from
+ * double-releasing the balance days, and wrapping both writes together means a failure partway
+ * through can't leave the request cancelled without its balance days actually released (or vice
+ * versa).
+ */
+export async function cancelLeaveRequestTx(id: string, decidedAt: string, balanceAdjustment: BalanceAdjustment | null): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(schema.leaveRequests)
+      .set({ status: "CANCELLED", decidedAt: new Date(decidedAt) })
+      .where(and(eq(schema.leaveRequests.id, id), inArray(schema.leaveRequests.status, ["PENDING", "APPROVED"])))
+      .returning({ id: schema.leaveRequests.id });
+    if (updated.length === 0) return false;
 
-/** Like decideLeaveRequest, but leaves approverComment untouched — used when an employee cancels their own request. */
-export async function cancelLeaveRequest(id: string, decidedAt: string): Promise<void> {
-  await db.update(schema.leaveRequests).set({ status: "CANCELLED", decidedAt: new Date(decidedAt) }).where(eq(schema.leaveRequests.id, id));
+    if (balanceAdjustment) {
+      const { employeeId, leaveTypeId, year, days } = balanceAdjustment;
+      await tx
+        .update(schema.leaveBalances)
+        .set({ used: sql`greatest(0, ${schema.leaveBalances.used} + ${days})` })
+        .where(and(eq(schema.leaveBalances.employeeId, employeeId), eq(schema.leaveBalances.leaveTypeId, leaveTypeId), eq(schema.leaveBalances.year, year)));
+    }
+    return true;
+  });
 }
 
 // ---- settings ----

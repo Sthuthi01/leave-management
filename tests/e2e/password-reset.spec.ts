@@ -41,8 +41,10 @@ test("Forgot password: a user resets their own password and can log in with the 
   await page.getByRole("link", { name: "Forgot password?" }).click();
   // Forgot password? is a client-side (soft) navigation — wait for it to actually land before
   // interacting, or a fast fill() can hit the outgoing /login page's own Email field instead of
-  // the new one's.
-  await page.waitForURL("/forgot-password");
+  // the new one's. Uses the web-first `expect(...).toHaveURL()` rather than `page.waitForURL()`:
+  // the latter's default `waitUntil: "load"` doesn't reliably re-fire for a Next.js App Router
+  // soft navigation (see tests/e2e/helpers/set-password.ts for the same issue, confirmed there).
+  await expect(page).toHaveURL("/forgot-password");
   await page.getByLabel("Email").fill(email);
   await page.getByRole("button", { name: "Send reset link" }).click();
   await expect(page.getByText(/we've sent a link to reset your password/i)).toBeVisible();

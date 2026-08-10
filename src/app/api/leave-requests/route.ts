@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUserFromRequest } from "@/lib/auth";
 import { errorResponse } from "@/lib/api-response";
-import { accruedToDate, getOrCreateBalance, hydrateLeaveRequest, insertLeaveRequest, loadSnapshot, logAudit, nextRequestId, setBalanceUsed } from "@/lib/db/repo";
+import { applyLeaveRequestAtomic, hydrateLeaveRequest, loadSnapshot, logAudit } from "@/lib/db/repo";
 import { calculateLeaveDays } from "@/lib/business-days";
 import { withApiHandler } from "@/lib/api-handler";
 import type { LeaveStatus } from "@/types";
@@ -67,70 +67,42 @@ export const POST = withApiHandler(async (request: NextRequest) => {
   const leaveType = snapshot.leaveTypes.find((t) => t.id === leaveTypeId);
   if (!leaveType || !leaveType.isActive) return errorResponse(400, "Unknown or inactive leave type.");
 
-  // A person can't be on two leaves at once, regardless of leave type.
-  const overlapping = snapshot.leaveRequests.find(
-    (r) => r.employeeId === user.id && (r.status === "PENDING" || r.status === "APPROVED") && r.startDate <= endDate && r.endDate >= startDate
-  );
-  if (overlapping) {
-    return errorResponse(400, `This overlaps with ${overlapping.referenceNumber}, which is already ${overlapping.status.toLowerCase()} for ${overlapping.startDate} – ${overlapping.endDate}.`);
-  }
-
   const days = calculateLeaveDays(startDate, endDate, snapshot.holidays, snapshot.settings.workingDays);
   if (days <= 0) return errorResponse(400, "The selected range has no working days.");
 
-  // Leave types with no annual cap (e.g. Unpaid Leave) skip the balance check entirely.
-  const isCapped = leaveType.defaultDaysPerYear > 0;
-  const year = new Date(startDate).getFullYear();
-  const balance = await getOrCreateBalance(snapshot, user.id, leaveType.id, year);
-  const available = isCapped ? accruedToDate(user, leaveType, balance) : Infinity;
-  if (isCapped && days > available - balance.used) {
-    return errorResponse(400, `Insufficient balance: ${Math.max(0, available - balance.used)} day(s) available for ${leaveType.name}.`);
-  }
-
-  if (!leaveType.requiresApproval) {
-    if (isCapped) await setBalanceUsed(user.id, leaveType.id, year, balance.used + days);
-    const { id, referenceNumber } = await nextRequestId();
-    const newRequest = {
-      id,
-      referenceNumber,
-      employeeId: user.id,
-      leaveTypeId,
-      startDate,
-      endDate,
-      days,
-      reason,
-      status: "APPROVED" as const,
-      approverId: null,
-      approverComment: null,
-      appliedAt: new Date().toISOString(),
-      decidedAt: new Date().toISOString(),
-    };
-    await insertLeaveRequest(newRequest);
-    await logAudit(user, "Applied leave (auto-approved)", "LeaveRequest", `${referenceNumber} — ${user.name}`);
-    return NextResponse.json(hydrateLeaveRequest(snapshot, newRequest), { status: 201 });
-  }
-
-  if (!user.managerId) {
+  if (leaveType.requiresApproval && !user.managerId) {
     return errorResponse(400, "You have no manager assigned to approve this request. Contact HR.");
   }
 
-  const { id, referenceNumber } = await nextRequestId();
-  const newRequest = {
-    id,
-    referenceNumber,
-    employeeId: user.id,
-    leaveTypeId,
+  // The overlap check and the balance cap check both happen again, freshly, inside this call —
+  // not from the `snapshot` above, which could already be stale by the time it runs. See
+  // applyLeaveRequestAtomic's own comment for why: without a database-level lock serializing this
+  // per employee, a double-click or a client retry could otherwise land two concurrent requests
+  // that both see "no overlap yet" and both succeed. Cheap, non-racy checks (leave type
+  // active/exists, date validity, has-a-manager) are deliberately done above, before taking the
+  // lock, so the lock is held for as little time as possible.
+  const result = await applyLeaveRequestAtomic(snapshot, user, leaveType, {
     startDate,
     endDate,
     days,
     reason,
-    status: "PENDING" as const,
-    approverId: user.managerId,
-    approverComment: null,
-    appliedAt: new Date().toISOString(),
-    decidedAt: null,
-  };
-  await insertLeaveRequest(newRequest);
-  await logAudit(user, "Applied leave", "LeaveRequest", `${referenceNumber} — ${user.name}`);
-  return NextResponse.json(hydrateLeaveRequest(snapshot, newRequest), { status: 201 });
+    requiresApproval: leaveType.requiresApproval,
+    approverId: user.managerId ?? null,
+  });
+
+  if (!result.ok) {
+    if (result.reason === "OVERLAP") {
+      const o = result.overlapping;
+      return errorResponse(400, `This overlaps with ${o.referenceNumber}, which is already ${o.status.toLowerCase()} for ${o.startDate} – ${o.endDate}.`);
+    }
+    return errorResponse(400, `Insufficient balance: ${result.available} day(s) available for ${leaveType.name}.`);
+  }
+
+  await logAudit(
+    user,
+    leaveType.requiresApproval ? "Applied leave" : "Applied leave (auto-approved)",
+    "LeaveRequest",
+    `${result.request.referenceNumber} — ${user.name}`
+  );
+  return NextResponse.json(hydrateLeaveRequest(snapshot, result.request), { status: 201 });
 });

@@ -1,0 +1,8 @@
+# Runs the backup script every day at 2:00 AM (server time). Output is redirected to the
+# container's own stdout so it shows up in `docker compose -f docker-compose.prod.yml logs backup`
+# alongside every other service's logs, instead of disappearing into a file nobody looks at.
+#
+# To change the schedule: edit the line below, then run
+#   docker compose -f docker-compose.prod.yml up -d --force-recreate backup
+# to pick up the change. Cron schedule format: minute hour day month weekday.
+0 2 * * * sh /scripts/backup.sh >> /proc/1/fd/1 2>> /proc/1/fd/2

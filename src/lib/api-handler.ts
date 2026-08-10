@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import { NextResponse, type NextRequest } from "next/server";
 
 interface PgError extends Error {
@@ -46,6 +47,13 @@ export function withApiHandler<Ctx = unknown>(handler: RouteHandler<Ctx>): Wrapp
           stack: err instanceof Error ? err.stack : undefined,
         })
       );
+
+      // Also reported to Sentry (if configured — see sentry.server.config.ts), tagged with just
+      // the method and route, never the request body or any employee/customer data, so an
+      // on-call person gets alerted without that data ever leaving this server. A no-op if
+      // SENTRY_DSN isn't set.
+      Sentry.captureException(err, { tags: { route: request.nextUrl.pathname, method: request.method } });
+
       return NextResponse.json({ error: "Something went wrong. Please try again." }, { status: 500 });
     }
   };

@@ -25,6 +25,12 @@ test("HR Admin invites a new employee, who sets their own password and is signed
   // HR never sets or sees a password for the new account — the toast confirms an email went
   // out instead, and the row shows Invitation Pending, not any password field.
   await expect(page.getByText("Employee added")).toBeVisible();
+  // Search for the new employee rather than assuming they land on the currently-displayed page.
+  // The table is sorted alphabetically and paginated (8 per page) — with enough employees already
+  // in the database (this suite alone has created dozens across repeated runs), a freshly-created
+  // row is not guaranteed to be on page 1, and a plain `page.locator("tr", ...)` only searches the
+  // page currently rendered in the DOM. Same pattern already used for the "Active" check below.
+  await page.getByPlaceholder("Search by name, email, title...").fill(name);
   const row = page.locator("tr", { hasText: email }).or(page.locator("tr", { hasText: name }));
   await expect(row.getByText("Invitation Pending")).toBeVisible();
 
