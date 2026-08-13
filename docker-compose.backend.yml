@@ -1,0 +1,107 @@
+# LOCAL DEVELOPMENT ONLY for the Django + React rewrite. Insecure-by-design defaults below
+# (DEBUG=true, a labeled dev secret, host-exposed Postgres port) are correct and expected here —
+# do NOT reuse this file for UAT or production. Use docker-compose.backend.prod.yml for those; see
+# DEPLOYMENT.backend.md for the full guide.
+#
+# FULLY STANDALONE — this file is the complete local-dev stack for the React + Django
+# application: its own Postgres (backend-db), its own Mailpit (mailpit), its own Django backend
+# (backend), its own React frontend (frontend). It does not reference, extend, or depend on the
+# old Next.js app's docker-compose.yml in any way — that file is never required to start, test,
+# or develop this application. Nothing here shares data, a network, or a container with the old
+# app; `name:` below pins this stack to its own Compose project so its container/volume names can
+# never collide with the old app's, however either stack happens to be started.
+#
+#   docker compose -f docker-compose.backend.yml up -d --build
+#
+# Ports deliberately avoid the old Next.js stack's own (3000 app, 5433 db, 8025 + 1025 mailpit) so
+# both stacks can run side by side without a port conflict, even though neither requires the
+# other to be running at all: backend-db uses 5435, backend uses 8010, frontend (Vite dev server)
+# uses 5180, mailpit uses 8026 (web inbox) + 1026 (SMTP).
+
+name: leave-django-dev
+
+services:
+  backend-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${BACKEND_POSTGRES_USER:-leaveapp}
+      - POSTGRES_PASSWORD=${BACKEND_POSTGRES_PASSWORD:-leaveapp}
+      - POSTGRES_DB=${BACKEND_POSTGRES_DB:-leaveapp_django}
+    ports:
+      - "5435:5432"
+    volumes:
+      - backend-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BACKEND_POSTGRES_USER:-leaveapp} -d ${BACKEND_POSTGRES_DB:-leaveapp_django}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # This stack's own local email catcher — every invitation/reset email this backend sends lands
+  # here, viewable at http://localhost:8026. Deliberately not shared with the old Next.js app's
+  # own Mailpit (docker-compose.yml) — same image, separate container, separate ports, so this
+  # stack never needs that file present to develop or test email flows.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8026:8025" # web inbox — open http://localhost:8026
+      - "1026:1025" # SMTP port the backend container sends to (internal Docker-network port
+                     # stays 1025 — see SMTP_PORT below, which talks to mailpit:1025 inside the
+                     # Compose network, not the host-mapped 1026)
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    ports:
+      - "8010:8000"
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-local-dev-secret-not-for-production}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-true}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - DJANGO_DATABASE_URL=postgres://${BACKEND_POSTGRES_USER:-leaveapp}:${BACKEND_POSTGRES_PASSWORD:-leaveapp}@backend-db:5432/${BACKEND_POSTGRES_DB:-leaveapp_django}
+      - DJANGO_CORS_ALLOWED_ORIGINS=${FRONTEND_URL:-http://localhost:5180}
+      - DJANGO_CSRF_TRUSTED_ORIGINS=${FRONTEND_URL:-http://localhost:5180}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5180}
+      # This stack's own mailpit service above, reached over the Compose-internal network by
+      # service name — port 1025 here is mailpit's container-internal port, unrelated to the
+      # 1026 host-side mapping (which is only for a human/host-side SMTP client, if ever needed).
+      - SMTP_HOST=${SMTP_HOST:-mailpit}
+      - SMTP_PORT=${SMTP_PORT:-1025}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - EMAIL_FROM=${EMAIL_FROM:-Agrileaf <no-reply@agrileaf.in>}
+    volumes:
+      # Onboarding document uploads (Phase 6) — Django's MEDIA_ROOT defaults to <BASE_DIR>/media,
+      # i.e. /app/media inside this image (see backend/config/settings.py). Named so it survives
+      # `docker compose down` (but not `down -v`) the same way backend-db-data already does;
+      # never host-mounted or exposed by any web server — every download goes through
+      # onboarding.views.ResourceDocumentDownloadView, which re-checks visibility before
+      # streaming any bytes (see DEPLOYMENT.backend.md §12 for prod backup implications).
+      - backend-media-data:/app/media
+    depends_on:
+      backend-db:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      # Local dev only — always Vite's own dev server. UAT/production use
+      # docker-compose.backend.prod.yml instead, which builds the `prod` stage (nginx serving a
+      # production static build) — see frontend/Dockerfile and DEPLOYMENT.backend.md.
+      target: dev
+    ports:
+      - "5180:5173"
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8010/api}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend-db-data:
+  backend-media-data:

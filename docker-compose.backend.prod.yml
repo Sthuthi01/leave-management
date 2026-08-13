@@ -1,0 +1,141 @@
+# UAT / PRODUCTION deployment for the Django + React rewrite. Independent of
+# docker-compose.backend.yml (local development) — same reasoning as the existing Next.js app's
+# docker-compose.prod.yml: a hardened environment needs genuinely different failure behavior
+# (a missing secret should refuse to start, not silently fall back to something insecure) and
+# genuinely different services (no Mailpit, no Vite dev server, TLS termination). This file is
+# also independent of docker-compose.prod.yml (the Next.js app's own production stack) — the two
+# products are deployed separately, each with their own domain and TLS certificate; nothing here
+# touches the Next.js app's containers, volumes, or Caddy instance.
+#
+# Same file for both UAT and production — the only difference between the two is which .env file
+# you copy in and which domain you point at:
+#   UAT:         cp .env.backend.uat.example .env.backend
+#   Production:  cp .env.backend.production.example .env.backend
+#   docker compose -f docker-compose.backend.prod.yml --env-file .env.backend up -d --build
+#
+# Every ${VAR:?...} below means docker compose refuses to start with a clear error instead of
+# falling back to an insecure or wrong default. See DEPLOYMENT.md for the full deployment guide,
+# including first-HR-admin creation (does NOT require enabling DEBUG).
+
+services:
+  backend-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${BACKEND_POSTGRES_USER:?Set BACKEND_POSTGRES_USER — see .env.backend.production.example}
+      - POSTGRES_PASSWORD=${BACKEND_POSTGRES_PASSWORD:?Set BACKEND_POSTGRES_PASSWORD — see .env.backend.production.example}
+      - POSTGRES_DB=${BACKEND_POSTGRES_DB:?Set BACKEND_POSTGRES_DB — see .env.backend.production.example}
+    volumes:
+      - backend-db-prod-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BACKEND_POSTGRES_USER} -d ${BACKEND_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+    # Deliberately no `ports:` — reachable only from the `backend` container over the
+    # Compose-internal network, never from the host. For a one-off migration/backup/psql session,
+    # use `docker compose -f docker-compose.backend.prod.yml exec backend-db psql -U ... `
+    # rather than exposing a host port.
+
+  backend:
+    build: ./backend
+    # Deliberately no `ports:` — reachable only from the `frontend` (nginx) container over the
+    # Compose-internal network, never directly from the host/internet. All real traffic goes
+    # through Caddy -> frontend -> backend; see the `frontend` service and Caddyfile.backend.
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY — see .env.backend.production.example}
+      # Hardcoded, not env-overridable in this file: DEBUG=True must never reach a UAT/production
+      # deployment (it renders full stack traces, including settings, straight to end users on
+      # any unhandled error — see UAT readiness audit P1 finding). If you need to debug something,
+      # do it against a local docker-compose.backend.yml stack instead.
+      - DJANGO_DEBUG=false
+      - DJANGO_ALLOWED_HOSTS=${BACKEND_APP_DOMAIN:?Set BACKEND_APP_DOMAIN — see .env.backend.production.example}
+      - DJANGO_DATABASE_URL=postgres://${BACKEND_POSTGRES_USER}:${BACKEND_POSTGRES_PASSWORD}@backend-db:5432/${BACKEND_POSTGRES_DB}
+      - DJANGO_CORS_ALLOWED_ORIGINS=${FRONTEND_URL:?Set FRONTEND_URL to https://<BACKEND_APP_DOMAIN> — see .env.backend.production.example}
+      - DJANGO_CSRF_TRUSTED_ORIGINS=${FRONTEND_URL}
+      - FRONTEND_URL=${FRONTEND_URL}
+      # First-admin bootstrap: defaults to false (safe). Set to true ONLY for the single
+      # `bootstrap_admin` invocation, e.g.:
+      #   docker compose -f docker-compose.backend.prod.yml run --rm -e ALLOW_BOOTSTRAP_ADMIN=true \
+      #     backend python manage.py bootstrap_admin --name "..." --email "..."
+      # Never left set to true in this file/.env for normal operation. See DEPLOYMENT.md.
+      - ALLOW_BOOTSTRAP_ADMIN=${ALLOW_BOOTSTRAP_ADMIN:-false}
+      # Configurable per environment without a code change — see accounts/throttles.py.
+      - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-10/min}
+      - SET_PASSWORD_RATE_LIMIT=${SET_PASSWORD_RATE_LIMIT:-10/min}
+      # No console-backend fallback silently masking a missing SMTP config in your own deployment
+      # notes — but also not force-required here, matching the Next.js prod compose's own
+      # convention: if left unset, invitation/reset emails are logged to this container's own
+      # logs instead of delivered (fine for a first smoke-test, not for real users).
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - EMAIL_FROM=${EMAIL_FROM:?Set EMAIL_FROM to a verified sender address — see .env.backend.production.example}
+    volumes:
+      # Onboarding document uploads (Phase 6) — Django's MEDIA_ROOT defaults to /app/media inside
+      # this image. Deliberately NOT exposed by nginx (frontend/nginx.conf has no /media/
+      # location) or Caddy — every download is served by an authenticated Django view
+      # (onboarding.views.ResourceDocumentDownloadView) that re-checks the same visibility rule
+      # the resource itself uses, so a raw static-file URL was never an option here. This volume
+      # MUST be included in your backup routine alongside backend-db-prod-data — a Postgres-only
+      # backup would restore every Resource row but lose the actual uploaded files. See §12.
+      - backend-media-prod-data:/app/media
+    # GUNICORN_WORKERS defaults to 1, not a higher number, on purpose: accounts/throttles.py's
+    # login/set-password rate limits are backed by Django's default in-process LocMemCache, which
+    # is NOT shared across worker processes. With multiple workers, each keeps its own separate
+    # counter, so the effective limit becomes closer to (rate * workers) than the configured rate
+    # — verified live during UAT readiness testing (12 requests against 3 workers and a 10/min
+    # limit never triggered a single 429). Raise GUNICORN_WORKERS only after also pointing Django's
+    # CACHES at a shared backend (Redis/Memcached) so all workers see the same counter — see
+    # DEPLOYMENT.md.
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-1}
+    depends_on:
+      backend-db:
+        condition: service_healthy
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  frontend:
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        # Same-origin by default: Caddy -> frontend(nginx) serves both the SPA and, via
+        # nginx.conf's /api/ proxy, the backend — so the browser never needs a cross-origin URL.
+        # Baked into the static JS bundle at IMAGE BUILD time (Vite convention), which is why this
+        # is a build arg, not a runtime environment variable — see frontend/Dockerfile.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    # Deliberately no `ports:` — reachable only from the `caddy` container. See Caddyfile.backend.
+    depends_on:
+      - backend
+    restart: always
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - BACKEND_APP_DOMAIN=${BACKEND_APP_DOMAIN}
+    volumes:
+      - ./Caddyfile.backend:/etc/caddy/Caddyfile:ro
+      - backend-caddy-data:/data
+      - backend-caddy-config:/config
+    depends_on:
+      - frontend
+    restart: always
+
+volumes:
+  # Named explicitly and distinctly from docker-compose.backend.yml's `backend-db-data` (local
+  # dev) so the two can never be confused or accidentally share storage if ever run on the same
+  # host, and distinctly from the Next.js app's `db-data`/`caddy-data` for the same reason.
+  backend-db-prod-data:
+  backend-media-prod-data:
+  backend-caddy-data:
+  backend-caddy-config:

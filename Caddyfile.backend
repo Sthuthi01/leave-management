@@ -1,0 +1,23 @@
+# TLS termination and reverse proxy in front of the Django/React stack's `frontend` (nginx)
+# container — see docker-compose.backend.prod.yml's `caddy` service and DEPLOYMENT.md. This is a
+# separate Caddy instance/Caddyfile from the existing Next.js app's Caddyfile — the two stacks are
+# independently deployable (see docker-compose.backend.prod.yml's own header comment), so this
+# file must not be merged with or replace the original Caddyfile.
+#
+# {$BACKEND_APP_DOMAIN} must be a real domain (or subdomain, e.g. uat.yourcompany.com) that
+# resolves in public DNS to this machine, with ports 80/443 reachable from the internet — Caddy
+# then automatically obtains and renews a real HTTPS certificate from Let's Encrypt. HTTP is
+# automatically redirected to HTTPS. For a pure-internal deployment with no public DNS record,
+# see DEPLOYMENT.md for the manual-certificate alternative.
+{$BACKEND_APP_DOMAIN} {
+	reverse_proxy frontend:80 {
+		# Overwrite (not append) X-Forwarded-For with exactly what Caddy itself observed as the
+		# real connecting IP — same reasoning as the original Caddyfile: without this, a client
+		# could prepend an arbitrary fake IP ahead of the real one, and both Django's login/
+		# set-password rate limiting (accounts/throttles.py) and nginx's own forwarded-for header
+		# to the backend read this value, so a spoofed header would otherwise dodge throttling.
+		header_up X-Forwarded-For {http.request.remote.host}
+	}
+
+	encode gzip
+}

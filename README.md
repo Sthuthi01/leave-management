@@ -1,5 +1,10 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+> **Looking for the Django + React rewrite instead?** That's a separate, independently deployable
+> stack living in `backend/` and `frontend/` — see [DEPLOYMENT.backend.md](./DEPLOYMENT.backend.md)
+> for its local/UAT/production setup. Everything else in this README/DEPLOYMENT.md is about the
+> original Next.js app below.
+
 ## First-time local setup
 
 The fastest way to get a working app with your own HR Admin account (not the shared demo password) after cloning this repo:

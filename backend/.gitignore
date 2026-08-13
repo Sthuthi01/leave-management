@@ -1,0 +1,27 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments — this repo runs the backend exclusively via Docker,
+# but ignore common local-venv names in case anyone creates one for editor tooling.
+venv/
+.venv/
+env/
+ENV/
+
+# Django
+*.sqlite3
+/staticfiles/
+/media/
+
+# Local environment overrides — never commit real secrets.
+# The root-level .env.backend*.example files are the checked-in templates.
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
