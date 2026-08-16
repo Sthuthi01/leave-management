@@ -131,11 +131,45 @@ services:
       - frontend
     restart: always
 
+  # Backup mechanism for THIS stack's own backend-db — independent of the old Next.js app's
+  # `backup` service (docker-compose.prod.yml), which targets a different database (`leaflow`) and
+  # a different volume entirely. See backend-backup/ for the scripts and DEPLOYMENT.backend.md §12
+  # for the restore/disaster-recovery procedure. Mirrors the old app's backup service pattern
+  # (same image, same entrypoint shape, same daily-cron + immediate-first-run behavior) but
+  # additionally backs up the onboarding-document media volume alongside the database, since this
+  # stack (unlike the Next.js app) has one and the two must never be restored out of sync — see
+  # backend-backup/backup.sh.
+  backup:
+    image: postgres:16-alpine
+    depends_on:
+      backend-db:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=${BACKEND_POSTGRES_PASSWORD:?Set BACKEND_POSTGRES_PASSWORD — see .env.backend.production.example}
+      - POSTGRES_USER=${BACKEND_POSTGRES_USER:?Set BACKEND_POSTGRES_USER — see .env.backend.production.example}
+      - POSTGRES_DB=${BACKEND_POSTGRES_DB:?Set BACKEND_POSTGRES_DB — see .env.backend.production.example}
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-30}
+    volumes:
+      - backend-db-backups:/backups
+      - backend-media-prod-data:/media:ro
+      - ./backend-backup/backup.sh:/scripts/backup.sh:ro
+      - ./backend-backup/crontab:/etc/crontabs/root:ro
+    entrypoint: ["/bin/sh", "-c", "sh /scripts/backup.sh && crond -f -l 2"]
+    healthcheck:
+      # Unhealthy if there's no backup newer than 2 days old — since backups run daily, this
+      # only ever trips if something's actually gone wrong. Visible in `docker compose ps`.
+      test: ["CMD-SHELL", "find /backups -name 'backend_db_*.dump' -mtime -2 | grep -q ."]
+      interval: 1h
+      timeout: 10s
+    restart: always
+
 volumes:
   # Named explicitly and distinctly from docker-compose.backend.yml's `backend-db-data` (local
   # dev) so the two can never be confused or accidentally share storage if ever run on the same
-  # host, and distinctly from the Next.js app's `db-data`/`caddy-data` for the same reason.
+  # host, and distinctly from the Next.js app's `db-data`/`caddy-data`/`db-backups` for the same
+  # reason.
   backend-db-prod-data:
   backend-media-prod-data:
   backend-caddy-data:
   backend-caddy-config:
+  backend-db-backups:

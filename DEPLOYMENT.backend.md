@@ -104,13 +104,9 @@ production domain/secrets. Before going live:
 - [ ] `BACKEND_APP_DOMAIN`'s DNS record is live and ports 80/443 are reachable, so Caddy can
       complete the Let's Encrypt HTTPS challenge on first start (`docker compose -f
       docker-compose.backend.prod.yml logs caddy` to confirm the certificate was issued).
-- [ ] A database backup plan is in place — **this stack does not yet include an automated backup
-      service** (unlike the Next.js app's `docker-compose.prod.yml`, which has a dedicated
-      `backup` service). See [§12](#12-backup-considerations).
-- [ ] The `backend-media-prod-data` volume (onboarding document uploads, Phase 6) is included in
-      that same backup plan, taken in the same run as the database backup — see
-      [§12](#12-backup-considerations) for why the two must never be restored from mismatched
-      points in time.
+- [ ] The `backup` service (`docker-compose.backend.prod.yml`) is running and its healthcheck is
+      passing — `docker compose -f docker-compose.backend.prod.yml ps backup`. See
+      [§12](#12-backup-considerations).
 - [ ] `ALLOW_BOOTSTRAP_ADMIN` is left at its default (`false`/unset) in the standing `.env.backend`
       — only ever passed as a one-shot `-e` override, per [§7](#7-first-hr-admin-creation).
 
@@ -253,34 +249,34 @@ deployment:
 
 ## 12. Backup considerations
 
-**Not yet automated for this stack.** The Next.js app's `docker-compose.prod.yml` has a dedicated
-`backup` service (daily `pg_dump`, retained 30 days by default, restore-tested); this Django
-backend's `backend-db` currently has none. Before a real production launch, either:
+**Automated as of this stack's own `backup` service** (`docker-compose.backend.prod.yml`) —
+independent of the old Next.js app's `backup` service, which targets a different database
+(`leaflow`) and a different compose file entirely. Scripts live in `backend-backup/`:
 
-- Add an equivalent bundled backup service (a `pg_dump` cron container, mirroring the Next.js
-  app's `backup/backup.sh` pattern, pointed at `backend-db`'s own credentials/database name), or
-- Use a managed Postgres provider with built-in automated snapshots instead of the bundled
-  `backend-db` container (see the note in `.env.backend.production.example`).
+- `backend-backup/backup.sh` — runs once immediately when the `backup` container starts, then
+  daily at 2 AM (`backend-backup/crontab`). Dumps `backend-db` with `pg_dump -Fc` and archives the
+  onboarding-document media volume with `tar`, **in the same run, with the same timestamp** —
+  written to the `backend-db-backups` named volume, retained `BACKUP_RETENTION_DAYS` (default 30).
+- `backend-backup/test-restore.sh <db-backup-filename>` — restores a chosen backup into a
+  throwaway, temporary database to prove it's actually valid, then discards it. **Never touches
+  the real `backend-db`.** Run this periodically (e.g. monthly) — an untested backup is not a
+  backup.
+- `backend-backup/restore.sh <db-backup-filename>` — actual disaster recovery. Stops `backend`,
+  restores both the database and the matching media archive, restarts `backend`. Requires typing
+  `RESTORE` to confirm; refuses to run otherwise.
 
-Either way, test an actual restore before relying on it — an untested backup is not a backup.
+Check the `backup` service is healthy: `docker compose -f docker-compose.backend.prod.yml ps backup`
+(its healthcheck fails if no backup newer than 2 days exists). List available backups:
+`docker compose -f docker-compose.backend.prod.yml --env-file .env.backend exec backup ls -lh /backups`.
 
-**Onboarding document volume (Phase 6) — must be backed up together with the database, not
-separately.** Uploaded onboarding documents (policy PDFs, etc.) live on the `backend-media-prod-data`
-named volume (`/app/media` inside the `backend` container — see `docker-compose.backend.prod.yml`),
-not in Postgres. A `Resource` row and its uploaded file are two halves of the same fact:
-
-- A Postgres-only backup restores every `Resource`/`ResourceDocument` row, but `ResourceDocument.file`
-  will point at a path that no longer exists on disk — the resource "has a document" according to
-  the database, and downloading it 404s.
-- A media-volume-only backup has the files, but nothing to serve them under (no `ResourceDocument`
-  rows to resolve a resource id to a file path, and no visibility metadata to authorize a download).
-
-**Take both backups in the same run, restore both together.** For a `pg_dump`-and-volume-tar
-approach: `docker run --rm -v backend-media-prod-data:/media -v $(pwd):/backup alpine tar czf
-/backup/media-$(date +%F).tar.gz -C /media .` alongside the `pg_dump` step, both written with the
-same timestamp/run id so a restore always pairs a database snapshot with the media snapshot taken
-at the same moment — restoring a DB backup from Tuesday against Monday's media tarball reintroduces
-exactly the "row exists, file doesn't" (or vice versa) mismatch above.
+**Why the database and media volume are backed up together, not separately**: uploaded onboarding
+documents live on the `backend-media-prod-data` named volume (`/app/media` inside the `backend`
+container), not in Postgres. A `Resource` row and its uploaded file are two halves of the same
+fact — a Postgres-only backup restores every `Resource`/`ResourceDocument` row with a file path
+that no longer exists on disk (download 404s); a media-only backup has the files but no database
+rows to authorize or resolve a download to them. Restoring a database snapshot from one point in
+time against a media snapshot from a different one reintroduces exactly this mismatch — which is
+why `backup.sh` takes both in the same run and `restore.sh` restores both together by default.
 
 ## 13. Troubleshooting
 

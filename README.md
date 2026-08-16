@@ -1,234 +1,210 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Agrileaf Leave Management System
 
-> **Looking for the Django + React rewrite instead?** That's a separate, independently deployable
-> stack living in `backend/` and `frontend/` — see [DEPLOYMENT.backend.md](./DEPLOYMENT.backend.md)
-> for its local/UAT/production setup. Everything else in this README/DEPLOYMENT.md is about the
-> original Next.js app below.
+A leave/HR management application: employee and department management, leave types and balances,
+leave requests with a manager-approval workflow, holidays, an onboarding resource library and
+checklists, reports, an audit trail, and org-wide settings.
 
-## First-time local setup
+## Architecture
 
-The fastest way to get a working app with your own HR Admin account (not the shared demo password) after cloning this repo:
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, TypeScript, Ant Design, Vite |
+| Backend | Django, Django REST Framework |
+| Database | PostgreSQL |
+| Infrastructure | Docker / Docker Compose |
 
-1. **Install dependencies**
-   ```bash
-   npm install
-   ```
+This repository previously contained a Next.js/Drizzle implementation of the same product at the
+repository root. That implementation has been fully replaced by the stack described in this
+README — see [`PRE_CLEANUP_REVIEW.md`](./PRE_CLEANUP_REVIEW.md) and
+[`MIGRATION_AUDIT.md`](./MIGRATION_AUDIT.md) for the evidence.
 
-2. **Configure `.env`**
-   ```bash
-   cp .env.example .env
-   ```
-   Defaults work out of the box, except one: open `.env` and set `SEED_DEMO_DATA=false`. Leaving
-   it unset seeds a full set of demo employees (including an admin account with a shared,
-   publicly-documented password) — fine for quickly poking around the UI, but not what you want
-   if you're about to create your own real HR Admin below.
+## Frontend
 
-3. **Start Docker** (app, Postgres, and [Mailpit](https://mailpit.axllent.org/) — a fake SMTP
-   server that catches every email the app sends, viewable in a browser)
-   ```bash
-   docker compose up --build -d
-   ```
+- **React** 18.3.1 + **TypeScript** 5.7.2
+- **Ant Design** 5.22.5 (`@ant-design/icons`, `@ant-design/charts` for Reports)
+- **Vite** 6.0.3 — dev server and production build
+- **React Router** 7 — client-side routing
+- **TanStack Query** — server state / data fetching
+- Source: `frontend/src/`
 
-4. **Database migrations**
-   Nothing to run by hand — migrations apply automatically the moment the app handles its first
-   request. Confirm the stack is healthy:
-   ```bash
-   docker compose ps   # `app` should show "healthy" within a few seconds
-   ```
+## Backend
 
-5. **Create the first HR Admin**
-   ```bash
-   npm run bootstrap-admin -- --name "Your Name" --email "you@example.com"
-   ```
-   (Omit the flags to be prompted interactively instead.) This only works once — it refuses to
-   run if an HR Admin already exists, or if `NODE_ENV=production` is set — and it's a plain local
-   script, not a page or API route, so it has no effect on UAT or production. See
-   `scripts/bootstrap-admin.ts` for details.
+- **Django** 5.1.4 + **Django REST Framework** 3.15.2
+- 12 apps, one per domain area: `accounts`, `departments`, `leave_types`, `holidays`,
+  `leave_balances`, `leave_requests`, `dashboard`, `audit`, `org_settings`, `team_calendar`,
+  `reports`, `onboarding`
+- Session-based authentication (Django sessions + CSRF), Argon2 password hashing
+- Source: `backend/`
 
-6. **Access the application**
-   Open [http://localhost:3000](http://localhost:3000).
+## Database
 
-7. **Set the HR Admin password**
-   Open Mailpit at [http://localhost:8025](http://localhost:8025), find the "You're invited to
-   Agrileaf" email, and click the link to choose a password. You're signed in automatically once
-   it's set — no separate login step.
+**PostgreSQL 16.** Connected via `DJANGO_DATABASE_URL` (a `postgres://` URL — see
+`backend/config/settings.py`). No SQLite, no other database engine, anywhere in this stack.
 
-8. **Verify login**
-   You should already be on the dashboard. To double-check later, go to
-   [http://localhost:3000/login](http://localhost:3000/login) and sign in with that email/password.
+## Infrastructure
 
-## Getting Started
+Two Docker Compose files, matching the local-dev/production split already established for this
+stack:
 
-First, run the development server:
+| | Local development | UAT / Production |
+|---|---|---|
+| File | `docker-compose.backend.yml` | `docker-compose.backend.prod.yml` |
+| Env template | `.env.backend.example` | `.env.backend.uat.example` / `.env.backend.production.example` |
+| Frontend serving | Vite dev server (hot reload) | nginx serving a static production build |
+| Reverse proxy / TLS | None (direct ports) | Caddy (automatic HTTPS) |
+| Backend URL exposure | Published to host, for local tooling | Not published — reachable only inside the Docker network |
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+Full production deployment guide: [`DEPLOYMENT.backend.md`](./DEPLOYMENT.backend.md).
+
+## Repository structure
+
+```
+backend/            Django project — 12 apps, each with models/serializers/views/urls/tests
+frontend/            React + TypeScript + Ant Design app (Vite)
+backend-backup/       Backup/restore scripts for backend-db (see Backup and restore, below)
+docker-compose.backend.yml         Local development stack
+docker-compose.backend.prod.yml    UAT/production stack
+Caddyfile.backend                  Production reverse proxy / TLS config
+frontend/nginx.conf                 Production static-file + API-proxy config
+.env.backend*                      Environment templates (dev/UAT/production)
+DEPLOYMENT.backend.md              Full deployment guide
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Docker
-
-The app ships with a multi-stage `Dockerfile` built around Next.js's `output: "standalone"` mode, so the image only contains what's needed to run the server — not the full `node_modules` or source tree.
-
-### Local development
+## How to start the application (local development)
 
 ```bash
-cp .env.example .env   # fill in values if you want, defaults work out of the box
-docker compose up --build
+cp .env.backend.example .env.backend   # fill in values if you want — defaults work out of the box
+docker compose -f docker-compose.backend.yml up -d --build
 ```
 
-This starts three containers: `app` on [http://localhost:3000](http://localhost:3000), a Postgres `db` (data persisted in a named volume, exposed on host port `5433`), and [Mailpit](https://mailpit.axllent.org/) — a fake SMTP server that catches every invitation/password-reset email the app sends, viewable at [http://localhost:8025](http://localhost:8025), so nothing gets sent to a real inbox while testing.
+This starts four containers:
 
-A container health check hits `/api/health`; `docker compose ps` will show `app` as `healthy` once the server is accepting requests.
+| Service | URL | Purpose |
+|---|---|---|
+| **frontend** | **http://localhost:5180** | React app (Vite dev server) |
+| **backend** | **http://localhost:8012** | Django API (gunicorn) |
+| backend-db | (internal only, host port 5435) | PostgreSQL 16 |
+| mailpit | http://localhost:8026 | Catches invitation/reset emails sent locally |
 
-### Production
-
-See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the full guide — required environment variables, configuring a real SMTP provider (SendGrid, SES, Postmark, Mailgun, etc.), using a managed database instead of a bundled one, and secrets management. Quick version:
+Confirm everything is healthy:
 
 ```bash
-cp .env.production.example .env
-# fill in every value — docker-compose.prod.yml refuses to start if any required one is missing
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.backend.yml ps
+```
+
+## Database / migrations
+
+Nothing to run by hand in normal operation — `backend/entrypoint.sh` runs
+`python manage.py migrate --noinput` automatically on every container start, in every
+environment. This is additive/idempotent; it never resets or drops anything.
+
+To run migration commands manually (e.g. after adding a new one during development):
+
+```bash
+docker compose -f docker-compose.backend.yml exec backend python manage.py makemigrations
+docker compose -f docker-compose.backend.yml exec backend python manage.py migrate
+docker compose -f docker-compose.backend.yml exec backend python manage.py showmigrations
 ```
 
 ## Creating the first HR Admin
 
-There's no in-app page, API route, or environment variable that creates the first HR Admin —
-every employee-creation path (`POST /api/employees`) requires an already-authenticated `ADMIN`,
-which a brand-new database doesn't have. The method differs by environment:
-
-### Local development
-
-Use the `bootstrap-admin` script — see [First-time local setup](#first-time-local-setup) above,
-step 5. This script exists only in your git checkout: the Docker image (dev and prod both build
-the same minimal image) never contains `scripts/`, `src/`, or the dev tooling needed to run it, so
-**it cannot be used in UAT or production** — the procedure there is different, below.
-
-### UAT / Test
-
-No automated command exists for this environment. The supported procedure is a one-time,
-controlled database step, using the app's existing invitation mechanism — you insert the
-*employee row*, never a password.
-
-**Prerequisites:** the UAT app + Postgres containers already running (typically via
-`docker-compose.prod.yml`), shell/Docker access to the UAT host, a real reachable email address
-for the new admin, and real SMTP already configured in UAT's `.env` (see
-[DEPLOYMENT.md](./DEPLOYMENT.md#configuring-a-real-email-provider)). Do not set `SEED_DEMO_DATA`
-in UAT.
-
-1. Open a SQL shell on the UAT database:
-   ```bash
-   docker compose -f docker-compose.prod.yml exec db psql -U leaflow -d leaflow
-   ```
-2. Insert a department and the admin (replace only the name/email/title — never a password):
-   ```sql
-   INSERT INTO departments (id, name)
-   VALUES ('dept-hr', 'HR');
-
-   INSERT INTO employees (id, name, email, role, title, department_id, joined_at, status)
-   VALUES (
-     'emp-hr-admin-001',
-     'Full Name Here',
-     'admin@yourcompany.com',
-     'ADMIN',
-     'HR Administrator',
-     'dept-hr',
-     CURRENT_DATE,
-     'ACTIVE'
-   );
-   ```
-   `password_hash` is deliberately never mentioned, so it stays `NULL` — that's what tells the app
-   this person needs a real invite. Then `\q` to exit.
-3. Restart the app so its one-time startup check re-runs against the new row (it only fires once
-   per container lifetime):
-   ```bash
-   docker compose -f docker-compose.prod.yml restart app
-   ```
-4. Trigger it: open the UAT login page and attempt to log in with any placeholder credentials
-   (expected to fail). Even a failed login queries the database and wakes up the check that emails
-   the new admin their real invite, within moments.
-
-**Invitation email:** sent automatically by the app's existing `inviteEmployeesMissingPassword`
-function — the same code path and template as any other employee invite.
-
-**Password setup:** the admin opens the email, clicks the link, and chooses a password on the real
-"Set up your account" page — identical mechanism to local dev, just a real inbox instead of Mailpit.
-
-**Verify the account:**
-```sql
-SELECT id, name, email, role, status, (password_hash IS NOT NULL) AS has_password
-FROM employees WHERE email = 'admin@yourcompany.com';
-```
-`has_password` is `f` before they set a password, `t` after.
-
-**Verify HR Admin permissions:** have them log in on the UAT site and confirm the
-**Administration** nav section appears — that section is gated to `role = 'ADMIN'` only, so seeing
-it proves the role is correct, not just that the password worked.
-
-### Production
-
-Identical mechanism and commands to UAT above (substitute your production
-`docker compose -f docker-compose.prod.yml` invocation and connection details) — there is no
-separate production-only tool. What differs is the care around doing it:
-
-- Treat this as a deliberate, approved one-time change, not routine.
-- Confirm a recent, verified backup exists first (see
-  [DEPLOYMENT.md](./DEPLOYMENT.md#backups-and-disaster-recovery)).
-- Before running the `INSERT`, confirm you're connected to the right database:
-  `SELECT current_database();`
-- Restart only the `app` service (`restart app`), never the database.
-- Don't leave the `psql` session open or the connection string pasted anywhere persistent once done.
-- If the invite email doesn't arrive, troubleshoot SMTP (`docker compose -f docker-compose.prod.yml logs app`)
-  and re-trigger step 4 — never hand-compute and insert a `password_hash` as a workaround, since
-  that reintroduces exactly the "known/assigned password" risk this design avoids.
-
-### Summary
-
-| Environment | First Admin Creation Method | Command/Action | Password Setup | Verification |
-|---|---|---|---|---|
-| **Local** | `bootstrap-admin` script (git checkout only) | `npm run bootstrap-admin -- --name "..." --email "..."` | Click link in Mailpit (`localhost:8025`) → choose password → auto signed-in | Log in at `localhost:3000/login`; confirm **Administration** nav appears |
-| **UAT** | Manual `INSERT` (department + employee, `password_hash` left `NULL`) via `psql`, then restart `app` | `docker compose -f docker-compose.prod.yml exec db psql ...` → run `INSERT` → `docker compose -f docker-compose.prod.yml restart app` → attempt any login | Click link in real invitation email → choose password → auto signed-in | `password_hash IS NOT NULL` in DB, plus **Administration** nav appears after login |
-| **Production** | Same manual `INSERT` + restart procedure as UAT, with change-control care (verify DB, backup first, restrict access) | Same as UAT, run against production, with `SELECT current_database();` confirmed first | Same as UAT — real email, real chosen password | Same as UAT, plus confirm follow-on actions appear correctly in the audit log |
-
-## Testing
+There's no page, API route, or environment variable that creates the first HR Admin — every
+employee-creation path requires an already-authenticated `ADMIN`. Use the `bootstrap_admin`
+management command instead, a one-shot, explicitly-gated operation:
 
 ```bash
-npm test            # unit tests (vitest) — pure logic + mocked-auth RBAC checks, no DB/server needed
-npm run test:watch  # same, in watch mode
-npm run test:e2e    # end-to-end (Playwright) — needs the local dev stack running first:
-                     #   docker compose up -d
+docker compose -f docker-compose.backend.yml exec -e ALLOW_BOOTSTRAP_ADMIN=true backend \
+  python manage.py bootstrap_admin --name "Your Name" --email "you@example.com"
 ```
 
-The E2E suite (`tests/e2e/`) drives a real browser against the running `docker-compose.yml` stack and reads generated invitation/reset emails straight out of Mailpit's API — it covers login/logout, invitation → set password → auto sign-in, forgot/reset password, change password, leave application → approval/rejection, and role-based access (an Employee or Manager hitting an HR-Admin-only page or API directly gets blocked). It shares whatever database state the stack currently has — each test creates its own throwaway employee(s) rather than relying on or resetting existing data, so it's safe to run against your everyday local dev database.
+It refuses to run if an HR Admin already exists. `ALLOW_BOOTSTRAP_ADMIN=true` is a one-shot
+override for this single command — never leave it set in the environment's normal running
+configuration. This sends a real invitation email through the same code path as any other
+employee invite; check Mailpit (http://localhost:8026) locally, or the real inbox in UAT/prod.
 
-**A note on rate limiting during repeated CI/local runs:** `POST /api/auth/set-password` is rate-limited to 10 requests per 15-minute window (see `src/lib/rate-limit.ts`), keyed by client IP. Each full E2E run submits 5 such requests (invitation activation, password reset, change-password setup flows). Behind a real reverse proxy each caller gets a distinct IP-based bucket, so a normal user never comes close to this limit — but the local `docker-compose.yml` stack has no reverse proxy, so every request in that environment falls back to one shared bucket (see the `getClientIp` comment in `src/lib/rate-limit.ts` for why). Running the suite more than twice within the same 15-minute window — e.g. while iterating on a test locally, or a CI job that reruns the suite — can exhaust that shared bucket and cause later, entirely legitimate set-password submissions to receive a real `429`. This is the rate limiter working as designed, not test flakiness. If you hit it:
-- Restart the `app` container (`docker compose restart app`) — its rate-limit state is in-memory only, so this clears it instantly without touching the database or any other state, or
-- Wait for the 15-minute window to elapse.
+## API structure
 
-Do not raise this limit or special-case test traffic to work around it — it's a deliberate anti-abuse control and applies identically in UAT and production.
+All backend endpoints are under `/api/`, one prefix per Django app:
 
-## Learn More
+```
+/api/auth/            login, logout, me, set-password, change-password, forgot-password, csrf
+/api/employees/       employee CRUD, import, resend-invitation, send-password-reset
+/api/departments/     department CRUD
+/api/leave-types/     leave type CRUD
+/api/holidays/        holiday CRUD, import
+/api/leave-balances/  own leave balances
+/api/leave-requests/  apply/list/cancel/decide, preview
+/api/dashboard/       role-branched dashboard data (EMPLOYEE/MANAGER vs HR/ADMIN)
+/api/audit-log/       audit trail (admin only)
+/api/settings/        org-wide settings (read: any user, write: admin only)
+/api/team-calendar/   team/company leave calendar
+/api/reports/         admin-only reports
+/api/onboarding/      resources, checklists, tasks, documents, progress
+/api/health/          shallow liveness check
+/api/health/deep/     deep health check (verifies database connectivity)
+```
 
-To learn more about Next.js, take a look at the following resources:
+Full endpoint definitions: each app's `urls.py` under `backend/*/urls.py`, wired together in
+`backend/config/urls.py`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Frontend: typecheck, build, lint, tests
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Exactly the commands defined in `frontend/package.json` — nothing invented:
 
-## Deploy on Vercel
+```bash
+cd frontend
+npx tsc -b        # TypeScript check (also run as part of `npm run build`)
+npm run build     # tsc -b && vite build
+npm test          # vitest run
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+**Note:** `frontend/package.json` has no `lint` script configured at this time.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Backend: checks and tests
+
+```bash
+docker compose -f docker-compose.backend.yml exec backend python manage.py check
+docker compose -f docker-compose.backend.yml exec backend python manage.py test
+```
+
+The test suite creates and destroys its own throwaway test database automatically — it never
+touches your real development data.
+
+## Backup and restore
+
+`backend-db` (this stack's PostgreSQL) has its own backup mechanism, independent of anything
+from the old Next.js app — see `backend-backup/` and
+[`DEPLOYMENT.backend.md` §12](./DEPLOYMENT.backend.md#12-backup-considerations) for the full
+restore/disaster-recovery procedure. In short:
+
+- **Automatic**: a `backup` service in `docker-compose.backend.prod.yml` runs `backend-backup/backup.sh`
+  daily, dumping both the database and the onboarding-document media volume together (they must
+  never be restored from mismatched points in time).
+- **Manual test restore** (never touches the real database): `./backend-backup/test-restore.sh <backup-filename>`
+- **Disaster recovery** (replaces the real database — requires typing a confirmation word):
+  `./backend-backup/restore.sh <backup-filename>`
+
+## Environment configuration
+
+| File | Used for |
+|---|---|
+| `.env.backend.example` | Local development template |
+| `.env.backend.uat.example` | UAT template |
+| `.env.backend.production.example` | Production template |
+| `.env.backend` | Your real, filled-in, git-ignored file — copy from one of the above |
+
+Copy the appropriate template to `.env.backend` and fill in real values. Production/UAT refuse to
+start if any required variable is missing (`${VAR:?message}` syntax in
+`docker-compose.backend.prod.yml`) rather than silently falling back to something insecure.
+
+## Development workflow
+
+1. `docker compose -f docker-compose.backend.yml up -d --build`
+2. Edit `backend/` or `frontend/` — both are built with `COPY . .` at image-build time (no bind
+   mount), so **rebuild the relevant image after each source change**:
+   ```bash
+   docker compose -f docker-compose.backend.yml build backend   # or frontend
+   docker compose -f docker-compose.backend.yml up -d backend   # or frontend
+   ```
+3. Run the relevant checks (see above) before considering a change done.
+4. For production/UAT deployment, see [`DEPLOYMENT.backend.md`](./DEPLOYMENT.backend.md).

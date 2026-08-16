@@ -58,6 +58,11 @@ class HrDashboardTest(TestCase):
             self.assertIn(key, response.data)
 
     def test_on_leave_today_includes_only_approved_spanning_today(self):
+        # This test's whole point is applying for leave on self.today, so it can't be nudged to a
+        # different day like other tests in this file — skip on a weekend instead, matching the
+        # same guard already established in leave_requests/tests/test_apply.py.
+        if self.today.weekday() >= 5:
+            self.skipTest("today is a weekend in this test run")
         apply_leave_request(
             employee=self.employee_a1, leave_type=self.auto_leave_type,
             start_date=self.today, end_date=self.today, reason="",
@@ -119,6 +124,10 @@ class HrDashboardTest(TestCase):
         self.assertEqual(by_code[self.auto_leave_type.code]["allocated"], 0)
 
     def test_department_stats_employee_count_and_on_leave_today(self):
+        # Same reasoning as test_on_leave_today_includes_only_approved_spanning_today above —
+        # this test's on_leave_today assertion requires applying for leave on self.today itself.
+        if self.today.weekday() >= 5:
+            self.skipTest("today is a weekend in this test run")
         apply_leave_request(
             employee=self.employee_a1, leave_type=self.auto_leave_type,
             start_date=self.today, end_date=self.today, reason="",

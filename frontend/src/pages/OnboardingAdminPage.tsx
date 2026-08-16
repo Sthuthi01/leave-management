@@ -395,7 +395,7 @@ function DocumentModal({ resource, onClose, onChanged }: { resource: OnboardingR
     onError: (err) => message.error(err instanceof ApiError ? err.message : "Could not remove document."),
   });
 
-  const downloadUrl = `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api"}/onboarding/resources/${resource.id}/document/`;
+  const downloadUrl = `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8012/api"}/onboarding/resources/${resource.id}/document/`;
 
   return (
     <Modal title={`Document — ${resource.title}`} open onCancel={onClose} footer={null}>

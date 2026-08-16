@@ -20,7 +20,7 @@ export function ResourceLibraryPage() {
   }, [resources.data, category, search]);
 
   const isFiltered = search.trim().length > 0 || category !== "ALL";
-  const downloadUrl = (id: number) => `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api"}/onboarding/resources/${id}/document/`;
+  const downloadUrl = (id: number) => `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8012/api"}/onboarding/resources/${id}/document/`;
 
   return (
     <>

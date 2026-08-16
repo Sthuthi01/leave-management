@@ -15,7 +15,7 @@
 #
 # Ports deliberately avoid the old Next.js stack's own (3000 app, 5433 db, 8025 + 1025 mailpit) so
 # both stacks can run side by side without a port conflict, even though neither requires the
-# other to be running at all: backend-db uses 5435, backend uses 8010, frontend (Vite dev server)
+# other to be running at all: backend-db uses 5435, backend uses 8012, frontend (Vite dev server)
 # uses 5180, mailpit uses 8026 (web inbox) + 1026 (SMTP).
 
 name: leave-django-dev
@@ -54,7 +54,7 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8010:8000"
+      - "8012:8000"
     environment:
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-local-dev-secret-not-for-production}
       - DJANGO_DEBUG=${DJANGO_DEBUG:-true}
@@ -97,7 +97,7 @@ services:
     ports:
       - "5180:5173"
     environment:
-      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8010/api}
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8012/api}
     depends_on:
       - backend
     restart: unless-stopped
